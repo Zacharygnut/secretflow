@@ -23,11 +23,10 @@ from secretflow_fl.ml.nn.fl.backend.torch.fl_base import BaseTorchModel
 from secretflow_fl.ml.nn.fl.strategy_dispatcher import register_strategy
 
 
-# the client strategy in FedSMP
-class FedSMP(BaseTorchModel):
+# the client strategy in FedADP
+class FedADP(BaseTorchModel):
     """
-    Implemention of FedSMP algorithm in paper Federated Learning with Sparsified Model Perturbation: Improving Accuracy under Client-Level Differential Privacy: https://ieeexplore.ieee.org/abstract/document/10360319/.
-    FedSMP is a novel differentially-private FL scheme which can provide a client-level DP guarantee while maintaining high model accuracy. To mitigate the impact of privacy protection on model accuracy, Fed-SMP leverages a new technique called Sparsified Model Perturbation (SMP) where local models are sparsified first before being perturbed by Gaussian noise.
+    To balance privacy protection and model performance, we propose the Adaptive Weight-Based Differential Privacy Federated Learning (FedADP) framework, which processes model gradient parameters at the neural network layer level
     """
 
     def __init__(
@@ -41,7 +40,10 @@ class FedSMP(BaseTorchModel):
 
         self.grad_mask = None
         self.compression_ratio = kwargs.get("compression_ratio", 1.0)
-
+        self.tau1 = 0.99
+        self.tau3 = 0.97
+        self.alpha = 0.05
+        self.rho = 0.1 
     def train_step(
         self,
         weights: list,
@@ -99,25 +101,26 @@ class FedSMP(BaseTorchModel):
 
         model_weights = self.get_weights(return_numpy=True)
 
-        # FedSMP DP operation
+      # Weight-Based Adaptive Gradient Clipping (WDP)
         grads = [v2 - v1 for v1, v2 in zip(init_weights, model_weights)]
-
-      # add mask to sparsify the grads
         grads = [v2 * v1 for v1, v2 in zip(grads, self.grad_mask)]
 
         grads = [v / (self.compression_ratio + 1e-6) for v in grads]
+        
+      # Adaptive Gradient Update (AGU)
+        V1 = self.tau1 * V1 + (1 - self.tau1) * grads # Momment Estimation
+        V3 = self.tau3 * V3 + (1 - self.tau3) * grads ** 3
 
+        V1 = V1 / (1 - self.tau1) # Corrected Moment Estimation
+        V3 = V3 / (1 - self.tau3)
+
+        model_weights = init_weights + self.alpha * V1 / (self.rho + V3 ** (1/3)) # Adaptive Gradient Update 
+        
         # add noise
         if dp_strategy is not None:
             if dp_strategy.model_gdp is not None:
-                grads = dp_strategy.model_gdp(grads)
-
-        # add mask to the grads after the noise injection
-        grads = [v2 * v1 for v1, v2 in zip(grads, self.grad_mask)]
-
-  
-        model_weights = [v1 + v2 for v1, v2 in zip(init_weights, grads)]
-
+                model_weights = dp_strategy.model_gdp(model_weights)
+                
         return model_weights, num_sample
 
     def set_weights(self, weights):
@@ -139,15 +142,9 @@ class FedSMP(BaseTorchModel):
         if weights is not None:
             self.set_weights(weights)
 
-
-@register_strategy(strategy_name='fed_smp', backend='torch')
-class PYUFedSMP(FedSMP):
-    pass
-
-
-class FedSMP_server_agg_method:
+class FedADP_server_agg_method:
     """
-    The func of the server in FedSMP.
+    The func of the server in FedADP.
     The server aggregates the params from all clients and generates a new grad mask.
     args:
     model_params_list: the data sent from clients. [[params, mask], ...]
